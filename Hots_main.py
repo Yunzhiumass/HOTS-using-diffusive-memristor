@@ -111,7 +111,7 @@ u = 1
 
 layers = 2
 surf_dim = [7, 3]
-n_clusters = [32, 96]
+n_clusters = [64, 192]
 n_jobs = cpu_count()
 n_pol = [-1, 72]
 n_batches = [10, 20]
