@@ -3,7 +3,9 @@
 import numpy as np
 from joblib import Parallel, delayed
 from sklearn.cluster import MiniBatchKMeans
-from sklearn import svm
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 import time, gc
 from numba import jit
 
@@ -356,11 +358,21 @@ def infer(dataset, surf_dim, res_x, res_y, tau_params, n_pol, kmeans, num_batche
     return dataset
 
 
-def signature_gen(dataset, n_clusters, n_jobs):
+def signature_gen(dataset, n_clusters, n_jobs, hidden_units=128,
+                  max_iter=300, random_state=42):
+    """Return class prototypes and two trained two-layer perceptrons.
+
+    Each classifier has one ReLU hidden layer and a classification output
+    layer (two trainable affine layers). StandardScaler is fitted on training
+    recordings only. Inputs are raw counts or event-normalized histograms.
+    hidden_units, max_iter and random_state configure MLP training.
+    """
+
     def hists_gen(label, n_recordings, pols, n_clusters):
         n_events = len(pols)
-        hist = np.array([sum(pols == cluster) for cluster in range(n_clusters)]) / n_recordings
+        hist = np.array([sum(pols == cluster) for cluster in range(n_clusters)], dtype=float)
         norm_hist = hist / max(n_events, 1)
+
         return hist, norm_hist
 
     n_labels = len(dataset)
@@ -371,21 +383,36 @@ def signature_gen(dataset, n_clusters, n_jobs):
     labels = []
     for label in range(n_labels):
         n_recordings = len(dataset[label])
-        hists, norm_hists = zip(*Parallel(n_jobs=n_jobs)(delayed(hists_gen)(
-            label, n_recordings, dataset[label][recording][2], n_clusters
-        ) for recording in range(n_recordings)))
+        hists, norm_hists = zip(*Parallel(n_jobs=n_jobs)(delayed(hists_gen)(label,
+                                                                            n_recordings, dataset[label][recording][2],
+                                                                            n_clusters) for recording in
+                                                         range(n_recordings)))
         all_hists += hists
         all_norm_hists += norm_hists
-        labels += [label for _ in range(n_recordings)]
-        signatures[label, :] = sum(hists)
-        norm_signatures[label, :] = sum(norm_hists)
+        labels += [label for recording in range(n_recordings)]
+        signatures[label, :] = np.mean(hists, axis=0)
+        norm_signatures[label, :] = np.mean(norm_hists, axis=0)
 
-    svc = svm.SVC(decision_function_shape='ovr', kernel='poly')
-    svc.fit(all_hists, labels)
-    norm_svc = svm.SVC(decision_function_shape='ovr', kernel='poly')
-    norm_svc.fit(all_norm_hists, labels)
+    def build_classifier():
+        return make_pipeline(
+            StandardScaler(),
+            MLPClassifier(
+                hidden_layer_sizes=(hidden_units,),
+                activation='relu',
+                solver='adam',
+                batch_size='auto',
+                learning_rate_init=0.001,
+                max_iter=max_iter,
+                random_state=random_state,
+            ),
+        )
 
-    return signatures, norm_signatures, svc, norm_svc
+    mlp = build_classifier()
+    mlp.fit(all_hists, labels)
+    norm_mlp = build_classifier()
+    norm_mlp.fit(all_norm_hists, labels)
+    return signatures, norm_signatures, mlp, norm_mlp
+
 
 
 def histogram_accuracy(dataset, n_clusters, signatures, norm_signatures, n_jobs):
@@ -457,4 +484,44 @@ def spac_downsample(dataset, ldim):
         for recording in range((len(dataset[label]))):
             dataset[label][recording][0] = dataset[label][recording][0] // ldim
             dataset[label][recording][1] = dataset[label][recording][1] // ldim
+    return dataset
+
+def mlp_accuracy(dataset, n_clusters, mlp, norm_mlp):
+    """Evaluate fitted pipelines without fitting on test data; return percentages."""
+    hists, norm_hists, labels = [], [], []
+    for label, recordings in enumerate(dataset):
+        for recording in recordings:
+            pols = recording[2]
+            hist = np.bincount(pols, minlength=n_clusters).astype(float)
+            hists.append(hist)
+            norm_hists.append(hist / max(len(pols), 1))
+            labels.append(label)
+    if not labels:
+        raise ValueError("Cannot evaluate an empty test dataset")
+    hists, norm_hists = np.asarray(hists), np.asarray(norm_hists)
+    labels = np.asarray(labels)
+    predictions = mlp.predict(hists)
+    norm_predictions = norm_mlp.predict(norm_hists)
+    return (hists, norm_hists, 100.0 * np.mean(predictions == labels),
+            100.0 * np.mean(norm_predictions == labels), predictions, norm_predictions)
+
+
+def spac_downsample_to(dataset, source_x, source_y, target_x, target_y):
+    """Map the full source grid to an exact smaller grid, retaining all events.
+
+    Uses floor(x * target_x / source_x); odd dimensions need no edge crop.
+    Polarities, timestamps and event order are unchanged.
+    """
+    sizes = (source_x, source_y, target_x, target_y)
+    if any(not isinstance(size, (int, np.integer)) or size <= 0 for size in sizes):
+        raise ValueError("Grid dimensions must be positive integers")
+    if target_x > source_x or target_y > source_y:
+        raise ValueError("Target grid must not exceed source grid")
+    for recordings in dataset:
+        for recording in recordings:
+            for axis, source, target in ((0, source_x, target_x), (1, source_y, target_y)):
+                coords = np.asarray(recording[axis])
+                if np.any((coords < 0) | (coords >= source) | (coords != np.floor(coords))):
+                    raise ValueError("Event coordinates are outside the source grid or non-integral")
+                recording[axis] = coords.astype(np.int64) * target // source
     return dataset
