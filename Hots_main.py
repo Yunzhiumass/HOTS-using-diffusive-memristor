@@ -20,13 +20,13 @@ START_ROW_L2 = 73
 try:
     from Hotslib import (
         n_mnist_rearranging, learn, infer, signature_gen,
-        histogram_accuracy, dataset_resize, spac_downsample
+        mlp_accuracy, dataset_resize, spac_downsample, spac_downsample_to
     )
 except ModuleNotFoundError:
     print("Warning: 'Libs' folder not found. Trying to import from same directory...")
     from Hotslib import (
         n_mnist_rearranging, learn, infer, signature_gen,
-        histogram_accuracy, dataset_resize, spac_downsample
+        mlp_accuracy, dataset_resize, spac_downsample, spac_downsample_to
     )
 
 
@@ -107,7 +107,8 @@ num_labels = len(test_set_orig)
 res_x_orig = 28
 res_y_orig = 28
 
-u = 1
+# Spatial grid after each HOTS layer (separate from local surface size).
+layer_output_res = [(7, 7), (3, 3)]
 
 layers = 2
 surf_dim = [7, 3]
@@ -122,15 +123,22 @@ seeds = [1, 2, 3, 4, 5]
 # Dummy tau
 tau_params = [{'mean': 1000, 'std': 1}, {'mean': 2000, 'std': 1}]
 
+# Two trainable layers: one ReLU hidden layer and the class output layer.
+mlp_hidden_units = 128
+mlp_max_iter = 300
+
+H_classifiers = []
+H_raw_res = []
 H_kmeansss = []
 H_res = []
 
 
 for run in range(n_runs):
     print(f"\n--- Starting Run {run + 1}/{n_runs} ---")
-    run_euc_res = []
+    run_mlp_res = []
     run_norm_res = []
     run_kmeansss = []
+    run_classifiers = []
 
 
     train_set = copy.deepcopy(train_set_orig)
@@ -172,7 +180,9 @@ for run in range(n_runs):
         run_kmeansss.append(kmeans)
 
 
-        train_set = spac_downsample(train_set, u)
+        target_x, target_y = layer_output_res[layer]
+        train_set = spac_downsample_to(
+            train_set, layer_res_x, layer_res_y, target_x, target_y)
 
 
         test_set = infer(
@@ -181,15 +191,20 @@ for run in range(n_runs):
             custom_curve=custom_curve_layer[layer],
             custom_dt_max=custom_dt_max[layer]
         )
-        test_set = spac_downsample(test_set, u)
+        test_set = spac_downsample_to(
+            test_set, layer_res_x, layer_res_y, target_x, target_y)
 
-        layer_res_x = layer_res_x // u
-        layer_res_y = layer_res_y // u
+        print(f"  Output downsampled: {layer_res_x}x{layer_res_y} -> {target_x}x{target_y}")
+        layer_res_x, layer_res_y = target_x, target_y
 
 
-        signatures, norm_signatures, svc, norm_svc = signature_gen(train_set, n_clusters[layer], n_jobs)
-        test_signatures, test_norm_signatures, euc_accuracy, norm_euc_accuracy, euc_label, norm_euc_label = \
-            histogram_accuracy(test_set, n_clusters[layer], signatures, norm_signatures, n_jobs)
+        signatures, norm_signatures, mlp, norm_mlp = signature_gen(
+            train_set, n_clusters[layer], n_jobs,
+            hidden_units=mlp_hidden_units, max_iter=mlp_max_iter,
+            random_state=seeds[run])
+        run_classifiers.append({'raw': mlp, 'normalized': norm_mlp})
+        test_signatures, test_norm_signatures, mlp_accuracy_pct, norm_mlp_accuracy, mlp_label, norm_mlp_label = \
+            mlp_accuracy(test_set, n_clusters[layer], mlp, norm_mlp)
 
 
         train_hist_list, train_norm_hist_list, train_labels = [], [], []
@@ -230,28 +245,39 @@ for run in range(n_runs):
         df_test_norm['Label'] = test_labels
 
 
-        output_dir = "Features_14x14"
+        output_dir = "Features_7x7_3x3_mlp"
         os.makedirs(output_dir, exist_ok=True)
 
-        df_train.to_excel(f"{output_dir}/layer{layer + 1}_train_hist_14x14_73_u1_32_96.xlsx", index=False)
-        df_train_norm.to_excel(f"{output_dir}/layer{layer + 1}_train_hist_norm_14x14_73_u1_32_96.xlsx", index=False)
-        df_test.to_excel(f"{output_dir}/layer{layer + 1}_test_hist_14x14_73_u1_32_96.xlsx", index=False)
-        df_test_norm.to_excel(f"{output_dir}/layer{layer + 1}_test_hist_norm_14x14_73_u1_32_96.xlsx", index=False)
+        df_train.to_excel(f"{output_dir}/layer{layer + 1}_train_hist_{layer_res_x}x{layer_res_y}_k{n_clusters[layer]}_run{run + 1}.xlsx", index=False)
+        df_train_norm.to_excel(f"{output_dir}/layer{layer + 1}_train_hist_norm_{layer_res_x}x{layer_res_y}_k{n_clusters[layer]}_run{run + 1}.xlsx", index=False)
+        df_test.to_excel(f"{output_dir}/layer{layer + 1}_test_hist_{layer_res_x}x{layer_res_y}_k{n_clusters[layer]}_run{run + 1}.xlsx", index=False)
+        df_test_norm.to_excel(f"{output_dir}/layer{layer + 1}_test_hist_norm_{layer_res_x}x{layer_res_y}_k{n_clusters[layer]}_run{run + 1}.xlsx", index=False)
 
         print(f"Saved Raw and Norm histograms with Labels to {output_dir}/")
 
-        run_euc_res.append(euc_accuracy)
-        run_norm_res.append(norm_euc_accuracy)
-        print('Euclidean accuracy: ' + str(euc_accuracy) + '%')
-        print('Normalized euclidean accuracy: ' + str(norm_euc_accuracy) + '%')
+        run_mlp_res.append(mlp_accuracy_pct)
+        run_norm_res.append(norm_mlp_accuracy)
+        print('MLP accuracy: ' + str(mlp_accuracy_pct) + '%')
+        print('Normalized MLP accuracy: ' + str(norm_mlp_accuracy) + '%')
         gc.collect()
 
+    H_classifiers.append(run_classifiers)
+    H_raw_res.append(run_mlp_res)
     H_kmeansss.append(run_kmeansss)
     H_res.append(run_norm_res)
 
-filename = 'Results/test_result_14x14_73_u1_32_96.pkl'
+filename = 'Results/test_result_7x7_3x3_mlp.pkl'
 os.makedirs('Results', exist_ok=True)
 with open(filename, 'wb') as f:
-    pickle.dump([H_kmeansss, H_res], f)
+    pickle.dump({
+        'classifier': 'two_layer_mlp',
+        'layer_output_res': layer_output_res,
+        'spatial_mapping': 'floor(coord * target_size / source_size)',
+        'kmeans': H_kmeansss,
+        'classifiers': H_classifiers,
+        'raw_accuracy_percent': H_raw_res,
+        'normalized_accuracy_percent': H_res,
+        'mlp_params': {'hidden_units': mlp_hidden_units, 'max_iter': mlp_max_iter},
+    }, f)
 
 print("Done.")
