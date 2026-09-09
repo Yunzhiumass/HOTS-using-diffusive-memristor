@@ -54,4 +54,4 @@ python Hots_main.py
 
 ## Scope of this release
 
-This script runs a software HOTS pipeline using experimental relaxation curves. It does not control the physical hardware or include the two-layer MLP training and evaluation used in the manuscript. 
+This script runs a software HOTS pipeline using experimental relaxation curves. 
