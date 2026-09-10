@@ -3,7 +3,7 @@
 import numpy as np
 from joblib import Parallel, delayed
 from sklearn.cluster import MiniBatchKMeans
-from sklearn.neural_network import MLPClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 import time, gc
@@ -358,14 +358,14 @@ def infer(dataset, surf_dim, res_x, res_y, tau_params, n_pol, kmeans, num_batche
     return dataset
 
 
-def signature_gen(dataset, n_clusters, n_jobs, hidden_units=128,
-                  max_iter=300, random_state=42):
-    """Return class prototypes and two trained two-layer perceptrons.
+def signature_gen(dataset, n_clusters, n_jobs, max_iter=300,
+                  random_state=42, C=1.0):
+    """Return class prototypes and two single-layer Softmax classifiers.
 
-    Each classifier has one ReLU hidden layer and a classification output
-    layer (two trainable affine layers). StandardScaler is fitted on training
-    recordings only. Inputs are raw counts or event-normalized histograms.
-    hidden_units, max_iter and random_state configure MLP training.
+    Multiclass LogisticRegression with lbfgs learns one affine map Wx+b,
+    followed by Softmax; there is no hidden layer. This is Softmax regression,
+    not the hard-threshold perceptron learning rule. StandardScaler is fitted
+    on training recordings only. C is inverse L2 regularization strength.
     """
 
     def hists_gen(label, n_recordings, pols, n_clusters):
@@ -396,22 +396,19 @@ def signature_gen(dataset, n_clusters, n_jobs, hidden_units=128,
     def build_classifier():
         return make_pipeline(
             StandardScaler(),
-            MLPClassifier(
-                hidden_layer_sizes=(hidden_units,),
-                activation='relu',
-                solver='adam',
-                batch_size='auto',
-                learning_rate_init=0.001,
+            LogisticRegression(
+                solver='lbfgs',
+                C=C,
                 max_iter=max_iter,
                 random_state=random_state,
             ),
         )
 
-    mlp = build_classifier()
-    mlp.fit(all_hists, labels)
-    norm_mlp = build_classifier()
-    norm_mlp.fit(all_norm_hists, labels)
-    return signatures, norm_signatures, mlp, norm_mlp
+    slp = build_classifier()
+    slp.fit(all_hists, labels)
+    norm_slp = build_classifier()
+    norm_slp.fit(all_norm_hists, labels)
+    return signatures, norm_signatures, slp, norm_slp
 
 
 
@@ -486,7 +483,7 @@ def spac_downsample(dataset, ldim):
             dataset[label][recording][1] = dataset[label][recording][1] // ldim
     return dataset
 
-def mlp_accuracy(dataset, n_clusters, mlp, norm_mlp):
+def slp_accuracy(dataset, n_clusters, slp, norm_slp):
     """Evaluate fitted pipelines without fitting on test data; return percentages."""
     hists, norm_hists, labels = [], [], []
     for label, recordings in enumerate(dataset):
@@ -500,8 +497,8 @@ def mlp_accuracy(dataset, n_clusters, mlp, norm_mlp):
         raise ValueError("Cannot evaluate an empty test dataset")
     hists, norm_hists = np.asarray(hists), np.asarray(norm_hists)
     labels = np.asarray(labels)
-    predictions = mlp.predict(hists)
-    norm_predictions = norm_mlp.predict(norm_hists)
+    predictions = slp.predict(hists)
+    norm_predictions = norm_slp.predict(norm_hists)
     return (hists, norm_hists, 100.0 * np.mean(predictions == labels),
             100.0 * np.mean(norm_predictions == labels), predictions, norm_predictions)
 
