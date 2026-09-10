@@ -1,6 +1,7 @@
 
 
-
+import os
+os.environ["LOKY_MAX_CPU_COUNT"] = "4"
 from scipy import io
 import numpy as np
 import random, gc, pickle, sys, os
@@ -20,13 +21,13 @@ START_ROW_L2 = 73
 try:
     from Hotslib import (
         n_mnist_rearranging, learn, infer, signature_gen,
-        mlp_accuracy, dataset_resize, spac_downsample, spac_downsample_to
+        slp_accuracy, dataset_resize, spac_downsample, spac_downsample_to
     )
 except ModuleNotFoundError:
     print("Warning: 'Libs' folder not found. Trying to import from same directory...")
     from Hotslib import (
         n_mnist_rearranging, learn, infer, signature_gen,
-        mlp_accuracy, dataset_resize, spac_downsample, spac_downsample_to
+        slp_accuracy, dataset_resize, spac_downsample, spac_downsample_to
     )
 
 
@@ -113,7 +114,7 @@ layer_output_res = [(7, 7), (3, 3)]
 layers = 2
 surf_dim = [7, 3]
 n_clusters = [64, 192]
-n_jobs = cpu_count()
+n_jobs = 4
 n_pol = [-1, 64]
 n_batches = [10, 20]
 n_batches_test = [2, 2]
@@ -123,9 +124,9 @@ seeds = [1, 2, 3, 4, 5]
 # Dummy tau
 tau_params = [{'mean': 1000, 'std': 1}, {'mean': 2000, 'std': 1}]
 
-# Two trainable layers: one ReLU hidden layer and the class output layer.
-mlp_hidden_units = 128
-mlp_max_iter = 300
+# Single trainable affine layer followed by Softmax (multiclass logistic regression).
+slp_C = 1.0  # Inverse L2 regularization strength.
+slp_max_iter = 300
 
 H_classifiers = []
 H_raw_res = []
@@ -135,7 +136,7 @@ H_res = []
 
 for run in range(n_runs):
     print(f"\n--- Starting Run {run + 1}/{n_runs} ---")
-    run_mlp_res = []
+    run_slp_res = []
     run_norm_res = []
     run_kmeansss = []
     run_classifiers = []
@@ -198,13 +199,13 @@ for run in range(n_runs):
         layer_res_x, layer_res_y = target_x, target_y
 
 
-        signatures, norm_signatures, mlp, norm_mlp = signature_gen(
+        signatures, norm_signatures, slp, norm_slp = signature_gen(
             train_set, n_clusters[layer], n_jobs,
-            hidden_units=mlp_hidden_units, max_iter=mlp_max_iter,
+            C=slp_C, max_iter=slp_max_iter,
             random_state=seeds[run])
-        run_classifiers.append({'raw': mlp, 'normalized': norm_mlp})
-        test_signatures, test_norm_signatures, mlp_accuracy_pct, norm_mlp_accuracy, mlp_label, norm_mlp_label = \
-            mlp_accuracy(test_set, n_clusters[layer], mlp, norm_mlp)
+        run_classifiers.append({'raw': slp, 'normalized': norm_slp})
+        test_signatures, test_norm_signatures, slp_accuracy_pct, norm_slp_accuracy, slp_label, norm_slp_label = \
+            slp_accuracy(test_set, n_clusters[layer], slp, norm_slp)
 
 
         train_hist_list, train_norm_hist_list, train_labels = [], [], []
@@ -245,7 +246,7 @@ for run in range(n_runs):
         df_test_norm['Label'] = test_labels
 
 
-        output_dir = "Features_7x7_3x3_mlp"
+        output_dir = "Features_7x7_3x3_slp"
         os.makedirs(output_dir, exist_ok=True)
 
         df_train.to_excel(f"{output_dir}/layer{layer + 1}_train_hist_{layer_res_x}x{layer_res_y}_k{n_clusters[layer]}_run{run + 1}.xlsx", index=False)
@@ -255,29 +256,30 @@ for run in range(n_runs):
 
         print(f"Saved Raw and Norm histograms with Labels to {output_dir}/")
 
-        run_mlp_res.append(mlp_accuracy_pct)
-        run_norm_res.append(norm_mlp_accuracy)
-        print('MLP accuracy: ' + str(mlp_accuracy_pct) + '%')
-        print('Normalized MLP accuracy: ' + str(norm_mlp_accuracy) + '%')
+        run_slp_res.append(slp_accuracy_pct)
+        run_norm_res.append(norm_slp_accuracy)
+        print('SLP (Softmax) accuracy: ' + str(slp_accuracy_pct) + '%')
+        print('Normalized SLP (Softmax) accuracy: ' + str(norm_slp_accuracy) + '%')
         gc.collect()
 
     H_classifiers.append(run_classifiers)
-    H_raw_res.append(run_mlp_res)
+    H_raw_res.append(run_slp_res)
     H_kmeansss.append(run_kmeansss)
     H_res.append(run_norm_res)
 
-filename = 'Results/test_result_7x7_3x3_mlp.pkl'
+filename = 'Results/test_result_7x7_3x3_slp.pkl'
 os.makedirs('Results', exist_ok=True)
 with open(filename, 'wb') as f:
     pickle.dump({
-        'classifier': 'two_layer_mlp',
+        'classifier': 'single_layer_softmax',
+        'classifier_implementation': 'sklearn.linear_model.LogisticRegression',
         'layer_output_res': layer_output_res,
         'spatial_mapping': 'floor(coord * target_size / source_size)',
         'kmeans': H_kmeansss,
         'classifiers': H_classifiers,
         'raw_accuracy_percent': H_raw_res,
         'normalized_accuracy_percent': H_res,
-        'mlp_params': {'hidden_units': mlp_hidden_units, 'max_iter': mlp_max_iter},
+        'slp_params': {'C': slp_C, 'max_iter': slp_max_iter, 'solver': 'lbfgs'},
     }, f)
 
 print("Done.")
